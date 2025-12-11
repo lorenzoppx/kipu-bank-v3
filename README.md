@@ -1,4 +1,5 @@
 # kipu-bank-v2
+
 O smart contract *kipuSafeV2* foi deployado na rede de teste *SepoliaETH* via foundry no seguinte endereço:
 ```
 0x6b522d43d165a4383bd0f2f61ac87de4bf29df42
@@ -70,3 +71,19 @@ O contrato possui os seguintes erros que podem ser invocados:
 - error MaxDepositedReached(); <br>
 - error MaxWithDrawReached(); <br>
 
+# Forge Dependencies
+
+```
+forge install OpenZeppelin/openzeppelin-contracts
+forge install smartcontractkit/chainlink-brownie-contracts
+forge install foundry-rs/forge-std
+```
+
+# Forge Developments Commands
+
+```
+forge build
+forge test
+forge fmt
+forge snapshot
+```
