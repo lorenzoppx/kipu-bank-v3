@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0  
 pragma solidity >=0.8.26;
 
-// @title Contract KipuBank Espirito Coin
+// @title Contract Kipu Bank V3 Espirito Coin
 // @author Lorenzo Piccoli
-// @data 01/12/2025
+// @data 11/12/2025
 
 // Imports
 // Imports from OpenZeppelin Wizard page
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-using SafeERC20 for IERC20;
+using SafeERC20 for IERC20; // Recommended use safeERC20
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ERC20Pausable} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Pausable.sol";
@@ -18,16 +18,29 @@ import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20P
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 // Chain-link data feed
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+// import interfaces & base helpers do Uniswap v4
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
+// Import Periphery Helpers
+import {SafeCallback} from "@uniswap/v4-periphery/src/base/SafeCallback.sol";
+import {DeltaResolver} from "@uniswap/v4-periphery/src/base/DeltaResolver.sol";
+// Imports from PointsHook eth-ufes
+import {BaseHook} from "v4-periphery/utils/BaseHook.sol";
+import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {IHooks} from "v4-core/interfaces/IHooks.sol";
+
 
 // Declare custom errors
 error NotOwner();
 error ZeroAmount();
 error Reentracy();
 error NotAllowed();
+error NotAllowedToken();
 error NotAllowedLimitCash();
 error NonSufficientFunds();
 error GetErrorOracleChainLink();
 error MaxDepositedReached();
+error MaxBankCapReached();
 error MaxWithDrawReached();
 
 // Declare the main contract
@@ -37,18 +50,25 @@ contract kipuSafe is Pausable, AccessControl {
     //from OpenZeppelin Wizard
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
+    // Allowed token in kipu bank
+    address public allowedToken;
+
     // Testnet address ETH/USDC
-    //https://docs.chain.link/data-feeds/price-feeds/addresses?page=1&testnetPage=1&networkType=testnet&testnetSearch=ETH
+    // Link for get address data feed for a given coin
+    // https://docs.chain.link/data-feeds/price-feeds/addresses?page=1&testnetPage=1&networkType=testnet&testnetSearch=ETH
     address private constant _priceFeedAddress = 0x694AA1769357215DE4FAC081bf1f309aDC325306;
 
     // Admin and pauser roles setup
-    constructor(address defaultAdmin, address pauser) 
+    // Allowed token in kipu bank
+    constructor(address _defaultAdmin, address _pauser, address _allowedToken) 
     {
         // Define access roles
-        _grantRole(DEFAULT_ADMIN_ROLE, defaultAdmin);
-        _grantRole(PAUSER_ROLE, pauser);
+        _grantRole(DEFAULT_ADMIN_ROLE, _defaultAdmin);
+        _grantRole(PAUSER_ROLE, _pauser);
         // Define data feeed oracle chain link
         dataFeed = AggregatorV3Interface(_priceFeedAddress);
+        // Define allowed token supported in kipu bank
+        allowedToken = _allowedToken
         // Constructor to set the owner contract
         ownerContract = msg.sender;
     }
@@ -75,10 +95,13 @@ contract kipuSafe is Pausable, AccessControl {
 
     // Function for convert token to usd
     function getTOKEN2USD(address token, uint256 amount) public view returns (uint256){
+        // Checks
+        if(token != allowedToken) revert NotAllowedToken();
         uint8 tokenDecimals = IERC20Metadata(token).decimals();
         uint8 datafeedDecimals = getDecimalsFeed();
         // Change chain link by another datafeed
         // But my own token dont have this oracle in chain link
+        // I will use ETH/USD for test
         uint256 Token2Usd = uint256(getChainlinkETH2USD());
         uint256 amountUsd = (amount * Token2Usd)/(10**(datafeedDecimals+tokenDecimals-6));
         return amountUsd;
@@ -100,11 +123,15 @@ contract kipuSafe is Pausable, AccessControl {
     uint256 immutable limitCash = 1 ether;
 
     // Number of deposits in contract
-    uint16 private bankCap = 0;
+    uint16 private bankTransactions = 0;
     // Number of withdraws in contract
     uint16 private bankWithDraw = 0;
+    // Current bank cap in USDC
+    uint256 private bankCap = 0;
     // Global deposit limit for this contract
-    uint16 constant BANK_CAP_LIMIT = 1000;
+    uint16 constant BANK_TRANSACTIONS_LIMIT = 1000;
+    // Global limit for USDC of this contract (1 MILLION DOLLARS)
+    uint256 constant BANK_MAX_CAP_USDC = 1 * 10**6;
 
     // Mapping to track the maximum allowed cash for each user
     mapping(address => string) public annotationBank;
@@ -142,7 +169,9 @@ contract kipuSafe is Pausable, AccessControl {
     receive() external payable{
         //Checks
         if (msg.value == 0) revert ZeroAmount();
-        if (bankCap > BANK_CAP_LIMIT) revert MaxDepositedReached();
+        if (bankTransactions > BANK_TRANSACTIONS_LIMIT) revert MaxDepositedReached();
+        if (bankCap > BANK_MAX_CAP_USDC) revert MaxBankCapReached();
+
         //Effects
         balances[address(0)][msg.sender] += msg.value;
         incrementDeposits();
@@ -153,7 +182,13 @@ contract kipuSafe is Pausable, AccessControl {
     function depositNative() external payable noReentracy(){
         //Check
         if (msg.value == 0) revert ZeroAmount();
-        if (bankCap > BANK_CAP_LIMIT) revert MaxDepositedReached();
+        if (bankTransactions > BANK_TRANSACTIONS_LIMIT) revert MaxDepositedReached();
+        if (bankCap > BANK_MAX_CAP_USDC) revert MaxBankCapReached();
+        //Another check now for bank cap
+        uint256 depositUSD = getETH2USD(token, amount);
+        uint256 newTotalCapBank = getBalanceInUSD() + depositUSD;
+        uint256 bankCapUSD = getBankCapUSD(); // Update bank cap in USD
+        if (newTotalCapBank > bankCapUSD) revert MaxBankCapReached();
         //Effects
         balances[address(0)][msg.sender] += msg.value;
         incrementDeposits();
@@ -165,6 +200,13 @@ contract kipuSafe is Pausable, AccessControl {
     function depositERC20(address token, uint256 amount) external payable noReentracy {
         //Check
         if (msg.value == 0) revert ZeroAmount();
+        if (bankCap > BANK_MAX_CAP_USDC) revert MaxBankCapReached();
+        if (token != allowedToken) revert NotAllowedToken();
+        //Another check now for bank cap
+        uint256 depositUSD = getTOKEN2USD(token, amount);
+        uint256 newTotalCapBank = getBalanceInUSD() + depositUSD;
+        uint256 bankCapUSD = getBankCapUSD(); // Update bank cap in USD
+        if (newTotalCapBank > bankCapUSD) revert MaxBankCapReached();
         //Effects
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
         balances[token][msg.sender] += amount;
@@ -233,7 +275,7 @@ contract kipuSafe is Pausable, AccessControl {
     // Function to get contract balance and stats
     function infoBalanceContract() public view returns (uint balance, uint16 deposits, uint16 withdraws, uint8 decimals){
         balance = address(this).balance;
-        deposits = bankCap;
+        deposits = bankTransactions;
         withdraws = bankWithDraw;
         decimals = 18;
     }
@@ -250,7 +292,7 @@ contract kipuSafe is Pausable, AccessControl {
     // Function to get contract balance and stats in USDT
     function infoBalanceContractUSD() public view returns (uint balance, uint16 deposits, uint16 withdraws, uint8 decimals){
         balance = getBalanceInUSD();
-        deposits = bankCap;
+        deposits = bankTransactions;
         withdraws = bankWithDraw;
         decimals = 8;
     }
@@ -267,12 +309,46 @@ contract kipuSafe is Pausable, AccessControl {
 
     //Function to increment number of deposits
     function incrementDeposits() private {
-        bankCap += 1;
+        bankTransactions += 1;
     }
 
     //Function to increment number of withdraws
     function incrementWithDraws() private {
         bankWithDraw += 1;
+    }
+
+    //Function to increment number of withdraws
+    function getBankCapUSD() private {
+        bankCap = getBalanceInUSD();
+        return bankCap;
+    }
+
+    /// @notice Retorna as permissões do hook
+    /// @dev Este hook implementa afterSwap e afterAddLiquidity
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+        return Hooks.Permissions({
+            beforeInitialize: false,
+            afterInitialize: false,
+            beforeAddLiquidity: false,
+            afterAddLiquidity: false,
+            beforeRemoveLiquidity: false,
+            afterRemoveLiquidity: false,
+            beforeSwap: false,
+            afterSwap: true, // ✅ Implementamos este hook
+            beforeDonate: false,
+            afterDonate: false,
+            beforeSwapReturnDelta: false,
+            afterSwapReturnDelta: false,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
+        });
+    }
+
+    /// @notice Retorna o volume total de uma pool
+    /// @param poolId ID da pool
+    /// @return Volume total em wei (ETH)
+    function getPoolVolume(PoolId poolId) external view returns (uint256) {
+        return poolVolume[poolId];
     }
 
 }

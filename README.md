@@ -30,6 +30,14 @@ Esse contrato aplica o padrão conhecido como checks-effects-interactions, para 
 
 Esse contrato possui suporte multi-token via contratos da OpenZeppelin segundo *ERC-20*, permitindo diferentes funcionalidades de depósito e saque.
 
+# Limite bank cap in USD
+
+Esse contrato possui um limite de capitalização do banco kipu implementado de 1 milhão de dólares, na tentativa de depósito todos os tokens ERC20 e ETH são convertidos ao respectivo montante em dólar e o limite é verificado na realização da transação.
+
+# Funcionalidades do KipuBankV2
+
+Esse contrato herda todo o supote a depósitos, saques, consultas de oráculo de preço e lógica do proprietário(owner).
+
 # Interação com o contrato
 
 O contrato permite interação por meio das seguintes funções:
@@ -76,6 +84,8 @@ O contrato possui os seguintes erros que podem ser invocados:
 ```
 forge install OpenZeppelin/openzeppelin-contracts
 forge install smartcontractkit/chainlink-brownie-contracts
+forge install Uniswap/v4-core
+forge install Uniswap/v4-periphery
 forge install foundry-rs/forge-std
 ```
 
