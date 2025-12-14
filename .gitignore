@@ -20,3 +20,4 @@ node_modules/
 contracts/
 broadcast/
 *.json
+*.docx

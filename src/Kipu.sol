@@ -51,6 +51,7 @@ error MaxDepositedReached();
 error MaxBankCapReached();
 error MaxWithDrawReached();
 error SlippageTooHigh();
+error TokenCannotBeUSDC();
 
 // Declare the main contract
 contract kipuSafe is Pausable, AccessControl {
@@ -186,9 +187,7 @@ contract kipuSafe is Pausable, AccessControl {
     event FallbackCalled(address indexed from, uint256 value, uint256 amount);
     event OwnerContractTransferred(address indexed ownerContract, address indexed newOwner);
     event MessageSet(address indexed who, string message);
-    event SwapExecuted(address indexed who, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut);
-    event TokenCannotBeUSDC(address indexed who, address tokenIn);
-    
+    event SwapExecuted(address indexed who, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut);    
 
     // Declare custom modifiers
     modifier onlyOwnerContract(){
@@ -236,7 +235,7 @@ contract kipuSafe is Pausable, AccessControl {
         uint128 amountOutMin
     ) external {
         // Checks
-        if(tokenIn != USDC_SEPOLIA) revert TokenCannotBeUSDC(msg.sender, tokenIn);
+        if(tokenIn != USDC_SEPOLIA) revert TokenCannotBeUSDC();
         // Effects
         // Get the tokens from the user using Permit2
         permit2.transferFrom(msg.sender, address(this), amountIn, tokenIn);
