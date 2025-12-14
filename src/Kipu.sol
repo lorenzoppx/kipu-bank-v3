@@ -328,7 +328,7 @@ contract kipuSafe is Pausable, AccessControl {
             // 2. Recebemos a saída (USDC)
             poolManager.take(currency0, address(this), uint128(delta.amount0()));
 
-            amountOut = uint128(delta.amount0());´
+            amountOut = uint128(delta.amount0());
         }
 
         // Slippage check
