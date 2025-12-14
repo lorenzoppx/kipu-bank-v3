@@ -1,6 +1,6 @@
-# kipu-bank-v2
+# kipu-bank-v3
 
-O smart contract *kipuSafeV2* foi deployado na rede de teste *SepoliaETH* via foundry no seguinte endereço:
+O smart contract *kipuSafeV3* foi deployado na rede de teste *SepoliaETH* via foundry no seguinte endereço:
 ```
 0x6Aa781678F7BADA4f8BAa3fafE3c38cAAb1f7F57
 ```
@@ -108,4 +108,5 @@ forge build
 forge test
 forge fmt
 forge snapshot
+
 ```
