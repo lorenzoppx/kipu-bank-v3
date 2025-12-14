@@ -2,15 +2,15 @@
 
 O smart contract *kipuSafeV2* foi deployado na rede de teste *SepoliaETH* via foundry no seguinte endereço:
 ```
-0x6b522d43d165a4383bd0f2f61ac87de4bf29df42
+0x6Aa781678F7BADA4f8BAa3fafE3c38cAAb1f7F57
 ```
 Pode ser consultado no explorador de blocos *EtherScan*:
 ```
-https://sepolia.etherscan.io/address/0x6b522d43d165a4383bd0f2f61ac87de4bf29df42
+https://sepolia.etherscan.io/address/0x6Aa781678F7BADA4f8BAa3fafE3c38cAAb1f7F57
 ```
-Contrato deployado via:
+Contrato deployado via script:
 ```
-forge create --rpc-url $ALCHEMY_SEPOLIA_RPC --private-key $PRIVATE_KEY --verify --etherscan-api-key $ETHSCAN_KEY --broadcast script/safe.sol:kipuSafe --constructor-args <<arg1-address-admin>>  <<arg2-address-pauser>>
+forge script script/Kipu.s.sol:DeployKipu --rpc-url $ALCHEMY_SEPOLIA_RPC --broadcast --verify --etherscan-api-key $ETHSCAN_KEY -vvvvv
 ```
 # Controle de Acesso
 
@@ -34,9 +34,14 @@ Esse contrato possui suporte multi-token via contratos da OpenZeppelin segundo *
 
 Esse contrato possui um limite de capitalização do banco kipu implementado de 1 milhão de dólares, na tentativa de depósito todos os tokens ERC20 e ETH são convertidos ao respectivo montante em dólar e o limite é verificado na realização da transação.
 
-# Funcionalidades do KipuBankV2
+# Funcionalidades do KipuBankV3
 
 Esse contrato herda todo o supote a depósitos, saques, consultas de oráculo de preço e lógica do proprietário(owner).
+
+
+# Depósito de qualquer Token ERC20
+
+Qualquer token suportado pela Uniswap é aceito como depósito, sobre esse token realiza-se o auto-swap para ETH na ação do depósito.
 
 # Interação com o contrato
 
@@ -78,15 +83,22 @@ O contrato possui os seguintes erros que podem ser invocados:
 - error GetErrorOracleChainLink(); <br>
 - error MaxDepositedReached(); <br>
 - error MaxWithDrawReached(); <br>
+- error MaxBankCapReached(); <br>
 
 # Forge Dependencies
 
 ```
-forge install OpenZeppelin/openzeppelin-contracts
-forge install smartcontractkit/chainlink-brownie-contracts
-forge install Uniswap/v4-core
-forge install Uniswap/v4-periphery
 forge install foundry-rs/forge-std
+```
+
+# Npm Dependencies
+
+```
+npm install @openzeppelin/contracts 
+npm install @chainlink/contracts 
+npm install @uniswap/v4-core 
+npm install @uniswap/v4-periphery 
+npm install @uniswap/universal-router
 ```
 
 # Forge Developments Commands

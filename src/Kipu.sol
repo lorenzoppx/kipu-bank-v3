@@ -20,7 +20,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 // Imports of Universal Router and Permit2
 import {IUniversalRouter} from "@uniswap/universal-router/contracts/interfaces/IUniversalRouter.sol";
-import {IPermit2} from "@uniswap/permit2/src/interfaces/IPermit2.sol";
+import {IPermit2} from "@uniswap/v4-periphery/lib/permit2/src/interfaces/IPermit2.sol";
 // import interfaces & base helpers do Uniswap v4
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockCallback.sol";
@@ -28,11 +28,15 @@ import {IUnlockCallback} from "@uniswap/v4-core/src/interfaces/callback/IUnlockC
 import {SafeCallback} from "@uniswap/v4-periphery/src/base/SafeCallback.sol";
 import {DeltaResolver} from "@uniswap/v4-periphery/src/base/DeltaResolver.sol";
 // Imports from PointsHook eth-ufes
-import {BaseHook} from "v4-periphery/utils/BaseHook.sol";
-import {Hooks} from "v4-core/libraries/Hooks.sol";
-import {IHooks} from "v4-core/interfaces/IHooks.sol";
-// For get ratios of swap
-import { TickMath } from "@uniswap/v4-core/src/libraries/TickMath.sol";
+import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol"; // CORRETO
+
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {BalanceDelta, BalanceDeltaLibrary} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+using BalanceDeltaLibrary for BalanceDelta;
 
 // Declare custom errors
 error NotOwner();
@@ -46,10 +50,12 @@ error GetErrorOracleChainLink();
 error MaxDepositedReached();
 error MaxBankCapReached();
 error MaxWithDrawReached();
+error SlippageTooHigh();
 
 // Declare the main contract
 contract kipuSafe is Pausable, AccessControl {
     AggregatorV3Interface internal dataFeed;
+    
 
     //from OpenZeppelin Wizard
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
@@ -57,6 +63,7 @@ contract kipuSafe is Pausable, AccessControl {
     // Allowed token in kipu bank
     address public allowedToken;
 
+    // Uniswap V4 constants for swap
     uint160 public constant MIN_SQRT_RATIO = 4295128739;
     uint160 public constant MAX_SQRT_RATIO =  1461446703485210103287273052203988822378723970342;
 
@@ -67,6 +74,13 @@ contract kipuSafe is Pausable, AccessControl {
 
     address private constant _router = 0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD;
     address private constant _permit2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
+
+
+    IUniversalRouter public immutable universalRouter;
+    IPermit2 public immutable permit2;
+
+    IPoolManager public immutable poolManager;
+
 
     // Admin and pauser roles setup
     // Allowed token in kipu bank
@@ -100,6 +114,14 @@ contract kipuSafe is Pausable, AccessControl {
         return dataFeed.decimals();
     }
 
+
+    function TEST_DEPOSIT_ONLY(address tokenIn, uint160 amountIn) external {
+        // Tenta puxar o dinheiro usando Permit2
+        permit2.transferFrom(msg.sender, address(this), amountIn, tokenIn);
+        
+        // Se chegar aqui, funcionou! O dinheiro fica no contrato.
+    }
+
     // Get info with data feed  ETH/USDC
     function getChainlinkETH2USD() public view returns (int256) {
     (,int256 price,,,) = dataFeed.latestRoundData();
@@ -123,7 +145,7 @@ contract kipuSafe is Pausable, AccessControl {
 
     // Function for convert ETH to USD
     function getETH2USD(uint256 amount) public view returns (uint256){
-        uint8 tokenDecimals = IERC20Metadata(address(0)).decimals();
+        uint8 tokenDecimals = 18;
         uint8 datafeedDecimals = getDecimalsFeed();
         uint256 Eth2Usd = uint256(getChainlinkETH2USD());
         uint256 amountUsd = (amount * Eth2Usd)/(10**(datafeedDecimals+tokenDecimals-6));
@@ -145,7 +167,7 @@ contract kipuSafe is Pausable, AccessControl {
     // Global deposit limit for this contract
     uint16 constant BANK_TRANSACTIONS_LIMIT = 1000;
     // Global limit for USDC of this contract (1 MILLION DOLLARS)
-    uint256 constant BANK_MAX_CAP_USDC = 1 * 10**6;
+    uint256 constant BANK_MAX_CAP_USDC = 1_000_000 * 10**6;
 
     // Mapping to track the maximum allowed cash for each user
     mapping(address => string) public annotationBank;
@@ -164,6 +186,9 @@ contract kipuSafe is Pausable, AccessControl {
     event FallbackCalled(address indexed from, uint256 value, uint256 amount);
     event OwnerContractTransferred(address indexed ownerContract, address indexed newOwner);
     event MessageSet(address indexed who, string message);
+    event SwapExecuted(address indexed who, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut);
+    event TokenCannotBeUSDC(address indexed who, address tokenIn);
+    
 
     // Declare custom modifiers
     modifier onlyOwnerContract(){
@@ -193,43 +218,125 @@ contract kipuSafe is Pausable, AccessControl {
         emit Deposited(msg.sender, msg.value);
     }
 
+    // Address of token Sepolia USDC
+    address constant USDC_SEPOLIA = 0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238;
 
+    // Data structure to hold callback parameters
+    struct CallbackData {
+        address tokenIn;
+        address tokenOut;
+        uint256 amountIn;
+        uint128 amountOutMin;
+    }
+
+    // Function for receive arbitrary token and swap to USDC in the bank
     function depositArbitraryToken(
+        address tokenIn,
+        uint160 amountIn,
+        uint128 amountOutMin
+    ) external {
+        // Checks
+        if(tokenIn != USDC_SEPOLIA) revert TokenCannotBeUSDC(msg.sender, tokenIn);
+        // Effects
+        // Get the tokens from the user using Permit2
+        permit2.transferFrom(msg.sender, address(this), amountIn, tokenIn);
+        // Manipulate the callback data
+        bytes memory data = abi.encode(CallbackData({
+            tokenIn: tokenIn,
+            tokenOut: USDC_SEPOLIA, // Set tokenOut to USDC_SEPOLIA
+            amountIn: amountIn,
+            amountOutMin: amountOutMin
+        }));
+        // Execute the unlock on the PoolManager, triggering the callback
+        poolManager.unlock(data);
+    }
+
+    // Callback function invoked by PoolManager after unlock
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
+        // Checks
+        require(msg.sender == address(poolManager), "Only PoolManager");
+
+        // Effects
+        // Decode the callback data
+        CallbackData memory params = abi.decode(data, (CallbackData));
+
+        // Call the internal swap function
+        _swapExactInputSingle(
+            params.tokenIn,
+            params.tokenOut,
+            params.amountIn,
+            params.amountOutMin
+        );
+
+        return "";
+    }
+
+    // Function to execute swap exact input single
+    function _swapExactInputSingle(
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
         uint128 amountOutMin
-    ) external {
-        // 1. Recebe token via Permit2 (unchanged)
-        permit2.transferFrom(msg.sender, address(this), amountIn, tokenIn);
+    ) internal returns (uint256 amountOut) {
+        // Role of swap 
+        bool zeroForOne = tokenIn < tokenOut;
+        (Currency currency0, Currency currency1) = zeroForOne
+            ? (Currency.wrap(tokenIn), Currency.wrap(tokenOut))
+            : (Currency.wrap(tokenOut), Currency.wrap(tokenIn));
 
-        // 2. Approva o PoolManager (V4 USA APPROVAL TAMBÉM)
-        IERC20(tokenIn).approve(address(poolManager), amountIn);
-
-        // 3. Prepara PoolKey
+        // Define PoolKey parameters
+        // 3000 for fee and 60 for tickSpacing is default
         PoolKey memory key = PoolKey({
-            currency0: Currency.wrap(tokenIn),
-            currency1: Currency.wrap(tokenOut),
-            fee: 3000,
+            currency0: currency0,
+            currency1: currency1,
+            fee: 3000,       
+            tickSpacing: 60,
             hooks: IHooks(address(0))
         });
 
-        // 4. Realiza o swap via PoolManager
-        PoolManager.SwapParams memory params = PoolManager.SwapParams({
-            zeroForOne: tokenIn < tokenOut,
-            amountSpecified: int256(amountIn),
-            sqrtPriceLimitX96: tokenIn < tokenOut ? MIN_SQRT_RATIO : MAX_SQRT_RATIO
+        // Define SwapParams parameters
+        SwapParams memory params = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(amountIn),
+            sqrtPriceLimitX96: zeroForOne ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1
         });
 
-        poolManager.swap(key, params);
+        // Execute the swap via PoolManager
+        // 'delta' diz quem deve quanto para quem
+        BalanceDelta delta = poolManager.swap(key, params, "");
 
-        // 5. Agora o contrato possui tokenOut
-        uint256 out = IERC20(tokenOut).balanceOf(address(this));
-        require(out >= amountOutMin, "slippage");
+        // Settle the swap based on the delta
+        if (zeroForOne) {
+            // Cenário: TokenIn é currency0 (Menor endereço)
+            // delta.amount0() será negativo (Dívida que temos que pagar ao Manager)
+            // delta.amount1() será positivo (Lucro que temos a receber)
 
-        IERC20(tokenOut).transfer(msg.sender, out);
+            // 1. Pagamos a entrada (TokenIn)
+            IERC20(tokenIn).transfer(address(poolManager), uint128(-delta.amount0()));
+            
+            // 2. Recebemos a saída (USDC)
+            poolManager.take(currency1, address(this), uint128(delta.amount1()));
+            
+            amountOut = uint128(delta.amount1());
+
+        } else {
+            // Cenário: TokenIn é currency1 (Maior endereço)
+            
+            // 1. Pagamos a entrada (TokenIn)
+            IERC20(tokenIn).transfer(address(poolManager), uint128(-delta.amount1()));
+
+            // 2. Recebemos a saída (USDC)
+            poolManager.take(currency0, address(this), uint128(delta.amount0()));
+
+            amountOut = uint128(delta.amount0());´
+        }
+
+        // Slippage check
+        // For dont waste money if slippage is too high
+
+        if(amountOut >= amountOutMin) revert SlippageTooHigh();
+        emit SwapExecuted(msg.sender, tokenIn, tokenOut, amountIn, amountOut);
     }
-
 
     // Funtion to deposit ether into the contract
     function depositNative() external payable noReentracy(){
@@ -238,7 +345,7 @@ contract kipuSafe is Pausable, AccessControl {
         if (bankTransactions > BANK_TRANSACTIONS_LIMIT) revert MaxDepositedReached();
         if (bankCap > BANK_MAX_CAP_USDC) revert MaxBankCapReached();
         //Another check now for bank cap
-        uint256 depositUSD = getETH2USD(token, amount);
+        uint256 depositUSD = getETH2USD(msg.value);
         uint256 newTotalCapBank = getBankCapUSD() + depositUSD;
         if (newTotalCapBank > BANK_MAX_CAP_USDC) revert MaxBankCapReached();
         //Effects
@@ -251,9 +358,8 @@ contract kipuSafe is Pausable, AccessControl {
     // Deposit of token ERC20
     function depositERC20(address token, uint256 amount) external payable noReentracy {
         //Check
-        if (msg.value == 0) revert ZeroAmount();
         if (bankCap > BANK_MAX_CAP_USDC) revert MaxBankCapReached();
-        if (token != allowedToken) revert NotAllowedToken();
+        //if (token != allowedToken) revert NotAllowedToken();
         //Another check now for bank cap
         uint256 depositUSD = getTOKEN2USD(token, amount);
         uint256 newTotalCapBank = getBankCapUSD() + depositUSD;
@@ -369,14 +475,14 @@ contract kipuSafe is Pausable, AccessControl {
     }
 
     //Function to increment number of withdraws
-    function getBankCapUSD() private {
+    function getBankCapUSD() private returns (uint256) {
         bankCap = getBalanceInUSD();
         return bankCap;
     }
 
     /// @notice Retorna as permissões do hook
     /// @dev Este hook implementa afterSwap e afterAddLiquidity
-    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+    function getHookPermissions() public pure returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
             afterInitialize: false,
@@ -395,11 +501,7 @@ contract kipuSafe is Pausable, AccessControl {
         });
     }
 
-    /// @notice Retorna o volume total de uma pool
-    /// @param poolId ID da pool
-    /// @return Volume total em wei (ETH)
-    function getPoolVolume(PoolId poolId) external view returns (uint256) {
-        return poolVolume[poolId];
-    }
+
+
 
 }

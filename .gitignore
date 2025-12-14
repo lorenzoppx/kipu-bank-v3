@@ -15,7 +15,8 @@ docs/
 
 .github/
 foundry*
-test/
-script/
-src/
-lib/
+lib/*
+node_modules/
+contracts/
+broadcast/
+*.json
